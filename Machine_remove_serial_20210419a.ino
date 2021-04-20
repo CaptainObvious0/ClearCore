@@ -16,6 +16,7 @@
 #define foldSensorDown A11
 #define shearSensorUp A9
 #define shearSensorDown A10
+#define handSensor ?
 
 // Define buttons
 #define ESTOP DI6
@@ -61,7 +62,7 @@ bool pauseActive = false;
 double pieceLengths[8];
 int lastPiece = 0;
 
-int FeedSettleDelay = 0;
+int foldDelay = 0;
 
 void setup() {
   pinMode(pump, OUTPUT);
@@ -116,15 +117,17 @@ void setup() {
 void loop() {
   // put your main code here, to run repeatedly:
 
-  bool printError = false;
-  if (digitalRead(ESTOP)) {
+  bool printError = true;
+  if (!checkESTOPStatus()) {
       readSerial();
+      printError = false;
     } else {
       if (printError) {
         Serial.println("ERROR: ESTOP PRESSED");
         printError = false; 
       }
     }
+    
 }
 
 void checkForPause() {
@@ -200,7 +203,7 @@ void readSerial() {
   // knows when it was not able to fully write to the port 
 
     // Holding a string array for the commands
-    String stringBuffer[200];
+    String stringBuffer[64];
     // A string variable that will concat the incoming
     // characters until a dollar sign is found
     String currentCommand = "";
@@ -366,16 +369,12 @@ void parseSerial(String serialArray[], int commands) {
        shearDown();
     } else if (commandRun == "shearup") {
       shearUp(); 
-    } else if (commandRun == "shear") {
-      shearSensor();
     } else if (commandRun == "foldup") {
       foldUp();
     } else if (commandRun == "foldDown") {
       foldDown();
     } else if (commandRun == "foldtimed") {
       foldTimed(); 
-    } else if (commandRun == "fold") {
-      foldSensor();
     } else if (commandRun == "setdist") {
       // Used to indicate that the next characters will be numbers instead of commands
       expectingDistance = true;
@@ -395,8 +394,8 @@ void parseSerial(String serialArray[], int commands) {
           //Serial.println(commands);
         }
     } else if (commandRun.substring(0,6) == "delay=") {
-      String delayafterfeed  = commandRun.substring(6);
-      FeedSettleDelay = delayafterfeed.toDouble(); 
+      String distance  = commandRun.substring(6);
+      foldDelay = distance.toDouble(); 
     } else if (commandRun == "pause") {
       pauseActive = true;
     } else if (commandRun == "start") {
@@ -493,6 +492,7 @@ void printPiece(double pieceLengths[]) {
 
     if (i != 8){
       foldSensor();
+      delay(foldDelay);
     }
 
     //delay(750);
@@ -514,7 +514,7 @@ void foldSensor() {
 
   long current = millis();
 
-  if (!digitalRead(ESTOP)) {
+  if (checkESTOPStatus()) {
     return;
   }
 
@@ -532,7 +532,7 @@ void foldSensor() {
 
   digitalWrite(shearRelayUp, false);
 
-  if (!digitalRead(ESTOP)) {
+  if (checkESTOPStatus()) {
     return;
   }
 
@@ -591,7 +591,7 @@ void shearSensor() {
 
   long ShearRoutineStartMillis = millis();
   long MovementStarted = millis();
-  if (!digitalRead(ESTOP)) {
+  if (checkESTOPStatus()) {
     return;
   }
 
@@ -613,6 +613,27 @@ void shearSensor() {
   Serial.print("Waiting for shear to move down took=");
   Serial.println(millis() - shearDownTime);
   */
+
+  // Wait until the hand sensors is reading HIGH
+  // meaning that there is a hand in front of the sensor
+  // Once there is a hand in front of the sensor, the 
+  // program will continue to run and shear the last piece
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+  long duration = pulseIn(echoPin, HIGH);
+  int distance = duration * 0.034 / 2;
+  while (distance > 100) {
+    Serial.println("INFO: Waiting for hand sensor");
+    digitalWrite(trigPin, HIGH);
+    delayMicroseconds(10);
+    digitalWrite(trigPin, LOW);
+    duration = pulseIn(echoPin, HIGH);
+    distance = duration * 0.034 / 2;
+    continue;
+  }
   
   digitalWrite(shearRelayDown, false);
   digitalWrite(shearRelayUp, true);
@@ -668,6 +689,33 @@ void foldDown() {
   digitalWrite(foldRelay, false);
 }
 
+bool checkESTOPStatus() {
+
+  if (digitalRead(ESTOP)) {
+    return false;
+  }
+
+  digitalWrite(shearRelayDown, false);
+  digitalWrite(shearRelayUp, false);
+  digitalWrite(foldRelay, false);
+
+  // Move everything back to correct starting position
+  if (analogRead(shearSensorDown) > 2000) {
+    digitalWrite(shearRelayUp, true);
+    long shearStart = millis();
+    while (analogRead(shearSensorDown) > 2000) {
+
+      if (millis() - shearStart > 210) break;
+      
+      continue;
+    }
+    digitalWrite(shearRelayUp, false);
+  }
+
+  return true;
+  
+}
+
 bool moveMotorInches(double inches) {
   return moveMotor(inches * 25.4);
 }
@@ -676,7 +724,7 @@ bool moveMotor(double mm) {
 
   long current = millis();
 
-  if (!digitalRead(ESTOP)) {
+  if (checkESTOPStatus()) {
     return false;
   }
 
@@ -706,7 +754,7 @@ bool moveMotor(double mm) {
   // Check again if ESTOP is pressed since 
   // we're not sure how long it could take for 
   // everything to be in position
-  if (!digitalRead(ESTOP)) {
+  if (checkESTOPStatus()) {
     return false;
   }
 
@@ -721,7 +769,6 @@ bool moveMotor(double mm) {
     while (!motor.StepsComplete() || motor.HlfbState() != MotorDriver::HLFB_ASSERTED) {
         continue;
     }
-    delay(FeedSettleDelay);
     Serial.print("INFO: Motor move took=");
     Serial.println(millis() - current);
 
